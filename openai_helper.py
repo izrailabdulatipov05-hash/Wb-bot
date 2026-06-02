@@ -1,10 +1,8 @@
 import os
 import logging
-from openai import AsyncOpenAI
+import aiohttp
 
 logger = logging.getLogger(__name__)
-
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 async def generate_reply(review: dict) -> str:
@@ -13,80 +11,51 @@ async def generate_reply(review: dict) -> str:
     pros = review.get("pros", "").strip()
     cons = review.get("cons", "").strip()
 
-    # Собираем текст отзыва
-    review_parts = []
+    parts = []
     if text:
-        review_parts.append(f"Отзыв: {text}")
+        parts.append(f"Отзыв: {text}")
     if pros:
-        review_parts.append(f"Достоинства: {pros}")
+        parts.append(f"Достоинства: {pros}")
     if cons:
-        review_parts.append(f"Недостатки: {cons}")
-    review_full = "\n".join(review_parts) if review_parts else "Без текста"
+        parts.append(f"Недостатки: {cons}")
+    review_full = "\n".join(parts) if parts else "Без текста"
 
-    # Инструкция в зависимости от оценки
     if rating >= 4:
-        tone_instruction = (
-            "Это ХОРОШИЙ отзыв (оценка 4-5 звёзд). "
-            "Напиши искреннюю благодарность покупателю. "
-            "Порадуйся что товар понравился. "
-            "Пригласи вернуться снова. "
-            "Тон: тёплый, благодарный, живой."
-        )
+        tone = "Хороший отзыв. Поблагодари искренне, порадуйся что понравилось, пригласи вернуться."
     elif rating == 3:
-        tone_instruction = (
-            "Это НЕЙТРАЛЬНЫЙ отзыв (оценка 3 звезды). "
-            "Поблагодари за честный отзыв. "
-            "Извинись за то что не всё понравилось. "
-            "Скажи что учтёшь замечания. "
-            "Тон: вежливый, конструктивный."
-        )
+        tone = "Нейтральный отзыв. Поблагодари за честность, извинись, скажи что учтёшь."
     else:
-        tone_instruction = (
-            "Это НЕГАТИВНЫЙ отзыв (оценка 1-2 звезды). "
-            "Не оправдывайся и не спорь. "
-            "Принеси искренние извинения. "
-            "Скажи что хочешь разобраться в ситуации. "
-            "Предложи написать в личные сообщения для решения проблемы. "
-            "Тон: сочувствующий, профессиональный, готовый помочь."
-        )
+        tone = "Негативный отзыв. Извинись, не спорь, предложи написать в личку."
 
-    system_prompt = (
-        "Ты — вежливый и профессиональный менеджер по работе с клиентами интернет-магазина на Wildberries. "
-        "Пишешь ответы на отзывы покупателей от имени продавца. "
-        "Правила:\n"
-        "- Пиши по-русски, грамотно\n"
-        "- Ответ 2-4 предложения, не длиннее\n"
-        "- Звучи как живой человек, не как робот\n"
-        "- Не используй шаблонные фразы типа 'Уважаемый покупатель'\n"
-        "- Не упоминай конкурентов\n"
-        "- Не обещай того что не можешь выполнить\n"
-        "- Никаких emoji в ответе\n"
-    )
+    system_prompt = "Ты вежливый менеджер на Wildberries. Отвечаешь на отзывы. По-русски, 2-4 предложения, без emoji."
+    user_prompt = f"Оценка: {rating}/5\n{review_full}\n\nЗадача: {tone}\n\nНапиши ответ:"
 
-    user_prompt = (
-        f"Оценка покупателя: {rating} из 5\n"
-        f"{review_full}\n\n"
-        f"Задача: {tone_instruction}\n\n"
-        f"Напиши ответ продавца:"
-    )
-
+    api_key = os.getenv("OPENAI_API_KEY")
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 300,
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=300,
-            temperature=0.7,
-        )
-        reply = response.choices[0].message.content.strip()
-        logger.info(f"GPT reply generated ({len(reply)} chars) for rating={rating}")
-        return reply
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
-        # Запасной ответ если OpenAI недоступен
         if rating >= 4:
-            return "Благодарим за ваш отзыв! Рады, что товар вам понравился. Ждём вас снова!"
-        else:
-            return "Приносим извинения за доставленные неудобства. Напишите нам в личные сообщения — обязательно разберёмся в ситуации."
+            return "Благодарим за отзыв! Рады что понравилось. Ждём вас снова!"
+        return "Извините за неудобства. Напишите нам — обязательно разберёмся."
