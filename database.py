@@ -4,33 +4,23 @@ import logging
 from datetime import date
 
 logger = logging.getLogger(__name__)
-DB_PATH = "/data/bot.db"
 
 
 class Database:
     def __init__(self):
-        self.path = DB_PATH
+        self.path = "bot.db"
 
-    async def init(self):
-        os.makedirs("/data", exist_ok=True)
+    def init(self):
         conn = sqlite3.connect(self.path)
         c = conn.cursor()
         c.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id   INTEGER PRIMARY KEY,
-                username      TEXT DEFAULT '',
-                wb_token      TEXT DEFAULT '',
-                plan          TEXT DEFAULT 'test',
-                review_limit  INTEGER DEFAULT 9999,
-                created_at    TEXT DEFAULT (datetime('now'))
-            );
             CREATE TABLE IF NOT EXISTS replies (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id   INTEGER,
-                feedback_id   TEXT UNIQUE,
-                rating        INTEGER,
-                reply         TEXT,
-                created_at    TEXT DEFAULT (datetime('now'))
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                feedback_id TEXT UNIQUE,
+                rating      INTEGER,
+                reply       TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
             );
         """)
         conn.commit()
@@ -42,54 +32,26 @@ class Database:
         conn.row_factory = sqlite3.Row
         return conn
 
-    async def get_user(self, telegram_id: int):
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
-            return dict(row) if row else None
-
-    async def create_user(self, telegram_id: int, username: str):
-        with self._conn() as conn:
-            conn.execute("INSERT OR IGNORE INTO users (telegram_id, username) VALUES (?,?)", (telegram_id, username))
-            conn.commit()
-
-    async def save_wb_token(self, telegram_id: int, token: str):
-        with self._conn() as conn:
-            conn.execute("UPDATE users SET wb_token=? WHERE telegram_id=?", (token, telegram_id))
-            conn.commit()
-
-    async def get_users_with_token(self):
-        with self._conn() as conn:
-            rows = conn.execute("SELECT telegram_id, wb_token FROM users WHERE wb_token != '' AND wb_token IS NOT NULL").fetchall()
-            return [dict(r) for r in rows]
-
-    async def is_already_replied(self, feedback_id: str) -> bool:
+    def is_replied(self, feedback_id: str) -> bool:
         with self._conn() as conn:
             row = conn.execute("SELECT 1 FROM replies WHERE feedback_id=?", (feedback_id,)).fetchone()
             return row is not None
 
-    async def log_reply(self, telegram_id: int, feedback_id: str, rating: int, reply: str):
+    def log_reply(self, telegram_id, feedback_id, rating, reply):
         with self._conn() as conn:
             try:
-                conn.execute("INSERT INTO replies (telegram_id, feedback_id, rating, reply) VALUES (?,?,?,?)",
+                conn.execute("INSERT INTO replies (telegram_id,feedback_id,rating,reply) VALUES (?,?,?,?)",
                            (telegram_id, feedback_id, rating, reply))
                 conn.commit()
-                return True
             except:
-                return False
+                pass
 
-    async def get_stats(self, telegram_id: int) -> dict:
-        today_str = date.today().isoformat()
-        month_str = date.today().strftime("%Y-%m")
+    def get_count(self, telegram_id):
         with self._conn() as conn:
-            today = conn.execute("SELECT COUNT(*) as n FROM replies WHERE telegram_id=? AND created_at LIKE ?",
-                               (telegram_id, f"{today_str}%")).fetchone()["n"]
-            month = conn.execute("SELECT COUNT(*) as n FROM replies WHERE telegram_id=? AND created_at LIKE ?",
-                               (telegram_id, f"{month_str}%")).fetchone()["n"]
-            total = conn.execute("SELECT COUNT(*) as n FROM replies WHERE telegram_id=?",
-                               (telegram_id,)).fetchone()["n"]
-        return {"today": today, "month": month, "total": total}
+            return conn.execute("SELECT COUNT(*) as n FROM replies WHERE telegram_id=?",
+                              (telegram_id,)).fetchone()["n"]
 
-    async def get_history(self, telegram_id: int, limit: int = 5):
+    def get_history(self, telegram_id, limit=5):
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM replies WHERE telegram_id=? ORDER BY created_at DESC LIMIT ?",
                               (telegram_id, limit)).fetchall()
