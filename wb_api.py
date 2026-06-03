@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,13 @@ class WBClient:
 
     async def get_unanswered_reviews(self):
         url = f"{WB_BASE}/api/v1/feedbacks"
-        params = {"isAnswered": "false", "take": 20, "skip": 0}
+        params = {"isAnswered": "false", "take": 10, "skip": 0}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.headers, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 429:
-                        logger.warning("WB rate limit, skip this round")
+                        logger.warning("WB rate limit on GET, waiting 60s")
+                        await asyncio.sleep(60)
                         return []
                     if resp.status != 200:
                         text = await resp.text()
@@ -49,37 +51,23 @@ class WBClient:
             return []
 
     async def post_reply(self, feedback_id: str, text: str) -> bool:
-        # WB требует POST на отдельный эндпоинт для ответа
-        url = f"{WB_BASE}/api/v1/feedbacks"
-        payload = {"id": feedback_id, "text": text}
-        
-        # Пробуем PATCH
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.patch(url, headers=self.headers, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    body = await resp.text()
-                    logger.info(f"WB PATCH reply {feedback_id}: {resp.status} {body[:150]}")
-                    if resp.status in (200, 201, 204):
-                        return True
-                    
-                    # Если PATCH не работает — пробуем через answer эндпоинт
-                    if "method not allowed" in body.lower() or resp.status == 405:
-                        return await self._post_reply_v2(feedback_id, text)
-                    return False
-        except Exception as e:
-            logger.error(f"WB post_reply PATCH: {e}")
-            return await self._post_reply_v2(feedback_id, text)
-
-    async def _post_reply_v2(self, feedback_id: str, text: str) -> bool:
-        # Альтернативный эндпоинт
+        # Пауза перед запросом — соблюдаем лимит 1 req/sec
+        await asyncio.sleep(2)
         url = f"{WB_BASE}/api/v1/feedbacks/answer"
         payload = {"id": feedback_id, "text": text}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.post(
+                    url, headers=self.headers, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
                     body = await resp.text()
-                    logger.info(f"WB POST answer {feedback_id}: {resp.status} {body[:150]}")
+                    logger.info(f"WB answer {feedback_id}: status={resp.status} body={body[:200]}")
+                    if resp.status == 429:
+                        logger.warning("WB rate limit on POST, waiting 60s")
+                        await asyncio.sleep(60)
+                        return False
                     return resp.status in (200, 201, 204)
         except Exception as e:
-            logger.error(f"WB post_reply v2: {e}")
+            logger.error(f"WB post_reply error: {e}")
             return False
