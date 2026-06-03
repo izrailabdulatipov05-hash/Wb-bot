@@ -15,9 +15,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Токен берётся из Railway Variables - не теряется при перезапуске
+DEFAULT_WB_TOKEN = os.getenv("WB_TOKEN", "")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 db = Database()
+
+# Храним токены в памяти (загружаем из env при старте)
+wb_tokens = {}
 
 
 class SetupStates(StatesGroup):
@@ -39,9 +45,6 @@ def main_menu():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    user = await db.get_user(message.from_user.id)
-    if not user:
-        await db.create_user(message.from_user.id, message.from_user.username or "")
     await message.answer(
         "👋 *Привет!* Я автоматически отвечаю на отзывы покупателей на Wildberries.\n\n"
         "🤖 Использую GPT-4 — отвечаю как живой менеджер:\n"
@@ -74,24 +77,26 @@ async def save_wb_token(message: types.Message, state: FSMContext):
     ok, info = await wb.test_connection()
     if not ok:
         await message.answer(
-            f"❌ Не удалось подключиться к WB.\nОшибка: `{info}`\n\nПроверь токен и попробуй снова.",
+            f"❌ Не удалось подключиться к WB.\nОшибка: `{info}`",
             parse_mode="Markdown", reply_markup=main_menu()
         )
         await state.clear()
         return
-    await db.save_wb_token(message.from_user.id, token)
+    # Сохраняем в памяти
+    wb_tokens[message.from_user.id] = token
     await state.clear()
     await message.answer(
-        "✅ *WB подключён успешно!*\n\nБот будет автоматически проверять новые отзывы каждые *5 минут* и отвечать на них.\n\nМожешь закрыть бота — он работает в фоне 24/7 🚀",
+        "✅ *WB подключён успешно!*\n\nБот проверяет отзывы каждые *5 минут* и отвечает на них автоматически 🚀",
         parse_mode="Markdown", reply_markup=main_menu()
     )
+    logger.info(f"User {message.from_user.id} connected WB token")
 
 
 @dp.message(lambda m: m.text == "📊 Статистика")
 async def cmd_stats(message: types.Message):
-    stats = await db.get_stats(message.from_user.id)
+    replied = db.get_count(message.from_user.id)
     await message.answer(
-        f"📊 *Твоя статистика:*\n\n✅ Сегодня: *{stats['today']}*\n📅 За месяц: *{stats['month']}*\n📦 Всего: *{stats['total']}*",
+        f"📊 *Статистика:*\n\n✅ Всего отвечено: *{replied}*",
         parse_mode="Markdown"
     )
 
@@ -107,22 +112,24 @@ async def cmd_balance(message: types.Message):
 @dp.message(lambda m: m.text == "💳 Тарифы")
 async def cmd_tariffs(message: types.Message):
     await message.answer(
-        "💳 *Тарифы:*\n\n🟢 *Старт* — 1 000 ₽/мес — до 300 отзывов\n🟡 *Бизнес* — 2 000 ₽/мес — до 700 отзывов\n🔴 *Про* — 3 000 ₽/мес — до 1 500 отзывов\n\nСейчас бот работает в *тестовом режиме* без лимитов.",
+        "💳 *Тарифы:*\n\n🟢 *Старт* — 1 000 ₽/мес — до 300 отзывов\n"
+        "🟡 *Бизнес* — 2 000 ₽/мес — до 700 отзывов\n"
+        "🔴 *Про* — 3 000 ₽/мес — до 1 500 отзывов\n\n"
+        "Сейчас бот работает в *тестовом режиме* без лимитов.",
         parse_mode="Markdown"
     )
 
 
 @dp.message(lambda m: m.text == "📋 История")
 async def cmd_history(message: types.Message):
-    history = await db.get_history(message.from_user.id, limit=5)
+    history = db.get_history(message.from_user.id)
     if not history:
-        await message.answer("📋 История пуста. Бот ещё не отвечал на отзывы.")
+        await message.answer("📋 История пуста.")
         return
     text = "📋 *Последние ответы:*\n\n"
     for i, h in enumerate(history, 1):
         stars = "⭐" * h.get("rating", 0)
-        reply_preview = h['reply'][:80] if h.get('reply') else ''
-        text += f"{i}. {stars}\n_{reply_preview}..._\n\n"
+        text += f"{i}. {stars} — _{h['reply'][:80]}..._\n\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -131,63 +138,76 @@ async def cmd_referral(message: types.Message):
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{message.from_user.id}"
     await message.answer(
-        f"🎁 *Реферальная программа:*\n\nПриглашай продавцов и получай *10%* от их оплаты.\n\nТвоя ссылка:\n`{ref_link}`",
+        f"🎁 *Реферальная программа:*\n\nПриглашай продавцов и получай *10%*.\n\nТвоя ссылка:\n`{ref_link}`",
         parse_mode="Markdown"
     )
 
 
 @dp.message(lambda m: m.text == "⚙️ Профиль")
 async def cmd_profile(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    has_wb = bool(user and user.get("wb_token"))
+    has_wb = message.from_user.id in wb_tokens or bool(DEFAULT_WB_TOKEN)
     await message.answer(
-        f"⚙️ *Профиль:*\n\n👤 ID: `{message.from_user.id}`\n📛 Username: @{message.from_user.username or 'нет'}\n🟢 WB: *{'Подключён ✅' if has_wb else 'Не подключён ❌'}*\n\nДля сброса токена: /reset",
+        f"⚙️ *Профиль:*\n\n👤 ID: `{message.from_user.id}`\n"
+        f"🟢 WB: *{'Подключён ✅' if has_wb else 'Не подключён ❌'}*\n\n"
+        f"Для сброса: /reset",
         parse_mode="Markdown"
     )
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: types.Message):
-    await db.save_wb_token(message.from_user.id, "")
-    await message.answer("🔄 WB токен удалён. Введи новый через *🔑 Подключить API*", parse_mode="Markdown")
+    wb_tokens.pop(message.from_user.id, None)
+    await message.answer("🔄 Токен сброшен. Введи новый через *🔑 Подключить API*", parse_mode="Markdown")
 
 
 async def review_worker():
     logger.info("🔄 Review worker started")
+    # Небольшая задержка при старте
+    await asyncio.sleep(10)
+
     while True:
         try:
-            users = await db.get_users_with_token()
-            for user in users:
-                uid = user["telegram_id"]
-                token = user["wb_token"]
-                if not token:
-                    continue
+            # Собираем все активные токены
+            active_tokens = dict(wb_tokens)
+
+            # Добавляем дефолтный токен из env если есть
+            if DEFAULT_WB_TOKEN and 0 not in active_tokens:
+                active_tokens[0] = DEFAULT_WB_TOKEN
+
+            if not active_tokens:
+                logger.info("No tokens configured, waiting...")
+            else:
+                logger.info(f"Checking reviews for {len(active_tokens)} users")
+
+            for uid, token in active_tokens.items():
                 wb = WBClient(token)
                 reviews = await wb.get_unanswered_reviews()
                 if not reviews:
+                    logger.info(f"No unanswered reviews for user {uid}")
                     continue
                 logger.info(f"User {uid}: found {len(reviews)} unanswered reviews")
                 for review in reviews:
                     try:
-                        already = await db.is_already_replied(review["id"])
-                        if already:
+                        fid = review.get("id", "")
+                        if db.is_replied(fid):
                             continue
                         reply_text = await generate_reply(review)
-                        success = await wb.post_reply(review["id"], reply_text)
+                        success = await wb.post_reply(fid, reply_text)
                         if success:
-                            await db.log_reply(uid, review["id"], review.get("productValuation", 0), reply_text)
-                            logger.info(f"✅ Replied to review {review['id']}")
+                            db.log_reply(uid, fid, review.get("productValuation", 0), reply_text)
+                            logger.info(f"✅ Replied to {fid}")
                         else:
-                            logger.warning(f"❌ Failed to post reply for {review['id']}")
+                            logger.warning(f"❌ Failed to post reply for {fid}")
                     except Exception as e:
-                        logger.error(f"Error processing review {review.get('id')}: {e}")
+                        logger.error(f"Error on review {review.get('id')}: {e}")
         except Exception as e:
             logger.error(f"Review worker error: {e}")
+
         await asyncio.sleep(300)
 
 
 async def main():
-    await db.init()
+    db.init()
     asyncio.create_task(review_worker())
     logger.info("🚀 Bot started")
     await dp.start_polling(bot, skip_updates=True)
