@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -15,15 +16,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Токен берётся из Railway Variables - не теряется при перезапуске
-DEFAULT_WB_TOKEN = os.getenv("WB_TOKEN", "")
+RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")
+RAILWAY_PROJECT_ID = "e0a82bf1-41e5-4856-96da-30364133c4a4"
+RAILWAY_SERVICE_ID = "a6a9061e-4bd6-42f6-b81f-0deaad117e69"
+RAILWAY_ENV_ID = "fd7b05c8-87db-45ff-9a9d-b2e1c0248bb1"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 db = Database()
 
-# Храним токены в памяти (загружаем из env при старте)
+# Токены в памяти
 wb_tokens = {}
+
+# Загружаем WB_TOKEN из env при старте если есть
+_startup_wb_token = os.getenv("WB_TOKEN", "")
 
 
 class SetupStates(StatesGroup):
@@ -40,6 +46,42 @@ def main_menu():
         ],
         resize_keyboard=True
     )
+
+
+async def save_token_to_railway(token: str):
+    """Сохраняет WB токен в Railway Variables чтобы не терялся при перезапуске"""
+    if not RAILWAY_TOKEN:
+        logger.warning("RAILWAY_TOKEN not set, skipping Railway save")
+        return
+    url = "https://backboard.railway.app/graphql/v2"
+    query = """
+    mutation upsertVariables($input: VariableCollectionUpsertInput!) {
+        variableCollectionUpsert(input: $input)
+    }
+    """
+    variables = {
+        "input": {
+            "projectId": RAILWAY_PROJECT_ID,
+            "serviceId": RAILWAY_SERVICE_ID,
+            "environmentId": RAILWAY_ENV_ID,
+            "variables": {"WB_TOKEN": token}
+        }
+    }
+    headers = {
+        "Authorization": f"Bearer {RAILWAY_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={"query": query, "variables": variables},
+                                   headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                if "errors" in data:
+                    logger.error(f"Railway API error: {data['errors']}")
+                else:
+                    logger.info("✅ WB token saved to Railway Variables")
+    except Exception as e:
+        logger.error(f"Railway API exception: {e}")
 
 
 @dp.message(Command("start"))
@@ -60,7 +102,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def ask_wb_token(message: types.Message, state: FSMContext):
     await state.set_state(SetupStates.waiting_wb_token)
     await message.answer(
-        "🔑 Введи свой *WB API токен*:",
+        "🔑 Введи свой *WB API токен* (раздел Вопросы и отзывы):",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -82,11 +124,16 @@ async def save_wb_token(message: types.Message, state: FSMContext):
         )
         await state.clear()
         return
+
     # Сохраняем в памяти
     wb_tokens[message.from_user.id] = token
+
+    # Сохраняем в Railway Variables — не потеряется при перезапуске
+    await save_token_to_railway(token)
+
     await state.clear()
     await message.answer(
-        "✅ *WB подключён успешно!*\n\nБот проверяет отзывы каждые *5 минут* и отвечает на них автоматически 🚀",
+        "✅ *WB подключён успешно!*\n\nБот проверяет отзывы каждые *5 минут* и отвечает автоматически 🚀\n\nМожешь закрыть бота — работает в фоне 24/7",
         parse_mode="Markdown", reply_markup=main_menu()
     )
     logger.info(f"User {message.from_user.id} connected WB token")
@@ -94,9 +141,9 @@ async def save_wb_token(message: types.Message, state: FSMContext):
 
 @dp.message(lambda m: m.text == "📊 Статистика")
 async def cmd_stats(message: types.Message):
-    replied = db.get_count(message.from_user.id)
+    count = db.get_count(message.from_user.id)
     await message.answer(
-        f"📊 *Статистика:*\n\n✅ Всего отвечено: *{replied}*",
+        f"📊 *Статистика:*\n\n✅ Всего отвечено: *{count}*",
         parse_mode="Markdown"
     )
 
@@ -112,7 +159,8 @@ async def cmd_balance(message: types.Message):
 @dp.message(lambda m: m.text == "💳 Тарифы")
 async def cmd_tariffs(message: types.Message):
     await message.answer(
-        "💳 *Тарифы:*\n\n🟢 *Старт* — 1 000 ₽/мес — до 300 отзывов\n"
+        "💳 *Тарифы:*\n\n"
+        "🟢 *Старт* — 1 000 ₽/мес — до 300 отзывов\n"
         "🟡 *Бизнес* — 2 000 ₽/мес — до 700 отзывов\n"
         "🔴 *Про* — 3 000 ₽/мес — до 1 500 отзывов\n\n"
         "Сейчас бот работает в *тестовом режиме* без лимитов.",
@@ -129,7 +177,7 @@ async def cmd_history(message: types.Message):
     text = "📋 *Последние ответы:*\n\n"
     for i, h in enumerate(history, 1):
         stars = "⭐" * h.get("rating", 0)
-        text += f"{i}. {stars} — _{h['reply'][:80]}..._\n\n"
+        text += f"{i}. {stars}\n_{h['reply'][:80]}..._\n\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -145,9 +193,10 @@ async def cmd_referral(message: types.Message):
 
 @dp.message(lambda m: m.text == "⚙️ Профиль")
 async def cmd_profile(message: types.Message):
-    has_wb = message.from_user.id in wb_tokens or bool(DEFAULT_WB_TOKEN)
+    has_wb = message.from_user.id in wb_tokens or bool(_startup_wb_token)
     await message.answer(
-        f"⚙️ *Профиль:*\n\n👤 ID: `{message.from_user.id}`\n"
+        f"⚙️ *Профиль:*\n\n"
+        f"👤 ID: `{message.from_user.id}`\n"
         f"🟢 WB: *{'Подключён ✅' if has_wb else 'Не подключён ❌'}*\n\n"
         f"Для сброса: /reset",
         parse_mode="Markdown"
@@ -162,21 +211,15 @@ async def cmd_reset(message: types.Message):
 
 async def review_worker():
     logger.info("🔄 Review worker started")
-    # Небольшая задержка при старте
     await asyncio.sleep(10)
 
     while True:
         try:
-            # Собираем все активные токены
             active_tokens = dict(wb_tokens)
+            if _startup_wb_token and 0 not in active_tokens:
+                active_tokens[0] = _startup_wb_token
 
-            # Добавляем дефолтный токен из env если есть
-            if DEFAULT_WB_TOKEN and 0 not in active_tokens:
-                active_tokens[0] = DEFAULT_WB_TOKEN
-
-            if not active_tokens:
-                logger.info("No tokens configured, waiting...")
-            else:
+            if active_tokens:
                 logger.info(f"Checking reviews for {len(active_tokens)} users")
 
             for uid, token in active_tokens.items():
@@ -200,6 +243,8 @@ async def review_worker():
                             logger.warning(f"❌ Failed to post reply for {fid}")
                     except Exception as e:
                         logger.error(f"Error on review {review.get('id')}: {e}")
+                await asyncio.sleep(2)
+
         except Exception as e:
             logger.error(f"Review worker error: {e}")
 
