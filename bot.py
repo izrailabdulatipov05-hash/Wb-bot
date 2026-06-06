@@ -313,57 +313,66 @@ async def notify_expiring():
         await asyncio.sleep(3600)
 
 
+async def process_user(user: dict):
+    """Обрабатывает отзывы одного пользователя"""
+    uid = user["telegram_id"]
+    token = user["wb_token"]
+    try:
+        wb = WBClient(token)
+        reviews = await wb.get_unanswered_reviews()
+        if not reviews:
+            return
+        logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
+        replied_count = 0
+        for review in reviews:
+            fid = review.get("id", "")
+            if await db._is_replied(fid):
+                continue
+            has_token = await db.use_token(uid)
+            if not has_token:
+                try:
+                    await bot.send_message(uid,
+                        "⚠️ *Пробный период закончился*\n\n"
+                        "Бот приостановил ответы на отзывы.\n"
+                        "Оформите подписку: /pay",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+                break
+            reply_text = await generate_reply(review)
+            success = await wb.post_reply(fid, reply_text)
+            if success:
+                await db._log_reply(uid, fid, review.get("productValuation", 0), reply_text)
+                replied_count += 1
+                logger.info(f"✅ Replied to {fid}")
+            await asyncio.sleep(2)
+
+        if replied_count > 0:
+            try:
+                user_data = await db.get_user(uid)
+                tokens_left = user_data.get("tokens_left", 0) if user_data else 0
+                word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
+                await bot.send_message(uid,
+                    f"✅ Ответил на *{replied_count} {word}*\n"
+                    f"🎟 Осталось токенов: *{tokens_left}*",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Notification error {uid}: {e}")
+    except Exception as e:
+        logger.error(f"Error processing user {uid}: {e}")
+
+
 async def review_worker():
     logger.info("🔄 Review worker started")
     await asyncio.sleep(15)
     while True:
         try:
             users = await db.get_users_with_token()
-            for user in users:
-                uid = user["telegram_id"]
-                token = user["wb_token"]
-                wb = WBClient(token)
-                reviews = await wb.get_unanswered_reviews()
-                if not reviews:
-                    continue
-                logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
-                replied_count = 0
-                for review in reviews:
-                    fid = review.get("id", "")
-                    if await db._is_replied(fid):
-                        continue
-                    has_token = await db.use_token(uid)
-                    if not has_token:
-                        try:
-                            await bot.send_message(uid,
-                                "⚠️ *Пробный период закончился*\n\n"
-                                "Бот приостановил ответы на отзывы.\n"
-                                "Оформите подписку: /pay",
-                                parse_mode="Markdown"
-                            )
-                        except Exception:
-                            pass
-                        break
-                    reply_text = await generate_reply(review)
-                    success = await wb.post_reply(fid, reply_text)
-                    if success:
-                        await db._log_reply(uid, fid, review.get("productValuation", 0), reply_text)
-                        replied_count += 1
-                        logger.info(f"✅ Replied to {fid}")
-                    await asyncio.sleep(2)
-
-                if replied_count > 0:
-                    try:
-                        user_data = await db.get_user(uid)
-                        tokens_left = user_data.get("tokens_left", 0) if user_data else 0
-                        word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
-                        await bot.send_message(uid,
-                            f"✅ Ответил на *{replied_count} {word}*\n"
-                            f"🎟 Осталось токенов: *{tokens_left}*",
-                            parse_mode="Markdown"
-                        )
-                    except Exception as e:
-                        logger.error(f"Notification error {uid}: {e}")
+            if users:
+                logger.info(f"Processing {len(users)} users in parallel")
+                await asyncio.gather(*[process_user(u) for u in users])
         except Exception as e:
             logger.error(f"Review worker error: {e}")
         await asyncio.sleep(300)
