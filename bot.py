@@ -3,12 +3,13 @@ import logging
 import os
 import aiohttp
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from wb_api import WBClient
 from openai_helper import generate_reply
 from database import Database
@@ -26,15 +27,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 db = Database()
 
-# Тарифы: название -> (токены, дней, цена)
+# Тарифы: ключ -> (название, токены, месяцев, цена)
 PLANS = {
-    "trial":    ("Пробный 🆓",     10,    30,  0),
-    "start":    ("Старт 🟢",     1000,    30,  1000),
-    "business": ("Бизнес 🟡",    2000,    30,  2000),
-    "pro":      ("Про 🔴",       3000,    30,  3000),
-    "premium":  ("Премиум 💎",   4000,    30,  4000),
-    "ultra":    ("Ультра 🚀",    5000,    30,  5000),
-    "yearly":   ("Годовой 👑",  12000,   365, 10000),
+    "m1":  ("1 месяц",   1000,   1,   1000),
+    "m2":  ("2 месяца",  2000,   2,   2000),
+    "m3":  ("3 месяца",  3000,   3,   3000),
+    "m4":  ("4 месяца",  4000,   4,   4000),
+    "m5":  ("5 месяцев", 5000,   5,   5000),
+    "m6":  ("6 месяцев", 6000,   6,   6000),
+    "m12": ("12 месяцев",12000, 12,  10000),
 }
 
 
@@ -52,6 +53,18 @@ def main_menu():
         ],
         resize_keyboard=True
     )
+
+
+def tariffs_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣  1 месяц — 1 000 ₽ (1 000 ответов)",  callback_data="plan_m1")],
+        [InlineKeyboardButton(text="2️⃣  2 месяца — 2 000 ₽ (2 000 ответов)", callback_data="plan_m2")],
+        [InlineKeyboardButton(text="3️⃣  3 месяца — 3 000 ₽ (3 000 ответов)", callback_data="plan_m3")],
+        [InlineKeyboardButton(text="4️⃣  4 месяца — 4 000 ₽ (4 000 ответов)", callback_data="plan_m4")],
+        [InlineKeyboardButton(text="5️⃣  5 месяцев — 5 000 ₽ (5 000 ответов)",callback_data="plan_m5")],
+        [InlineKeyboardButton(text="6️⃣  6 месяцев — 6 000 ₽ (6 000 ответов)",callback_data="plan_m6")],
+        [InlineKeyboardButton(text="👑  12 месяцев — 10 000 ₽ (12 000 ответов)", callback_data="plan_m12")],
+    ])
 
 
 async def save_token_to_railway(token: str):
@@ -84,24 +97,47 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await db.create_user(message.from_user.id, message.from_user.username or "")
     user = await db.get_user(message.from_user.id)
     tokens = user.get("tokens_left", 10) if user else 10
+    plan = user.get("plan", "trial") if user else "trial"
+
+    if plan == "trial" and tokens <= 0:
+        await message.answer(
+            "👋 Добро пожаловать!\n\n"
+            "⚠️ *Пробный период закончился.*\n\n"
+            "Оформите подписку чтобы продолжить получать автоматические ответы на отзывы.",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+        await message.answer("Выберите тариф:", reply_markup=tariffs_keyboard())
+        return
+
     await message.answer(
-        "👋 *Привет!* Я автоматически отвечаю на отзывы покупателей на Wildberries.\n\n"
-        "🤖 GPT-4 отвечает как живой менеджер:\n"
-        "• ⭐⭐⭐⭐⭐ → благодарю покупателя\n"
-        "• ⭐⭐ → сглаживаю негатив\n\n"
-        f"🎁 У тебя *{tokens} пробных отзывов* бесплатно!\n\n"
-        "Подключи WB API токен кнопкой ниже 👇",
-        parse_mode="Markdown", reply_markup=main_menu()
+        "👋 Добро пожаловать!\n\n"
+        "Этот бот автоматически отвечает на отзывы покупателей в вашем магазине на Wildberries.\n\n"
+        "Просто подключите API ключ — и бот сам будет отвечать на все новые отзывы.\n\n"
+        f"🎁 Вам доступно *{tokens} бесплатных* ответов для знакомства с сервисом.\n\n"
+        "Нажмите *🔑 Подключить API* чтобы начать 👇",
+        parse_mode="Markdown",
+        reply_markup=main_menu()
     )
 
 
 @dp.message(lambda m: m.text == "🔑 Подключить API")
 async def ask_wb_token(message: types.Message, state: FSMContext):
+    user = await db.get_user(message.from_user.id)
+    if user and user.get("plan") == "trial" and user.get("tokens_left", 0) <= 0:
+        await message.answer(
+            "⚠️ *Пробный период закончился*\n\nОформите подписку чтобы продолжить:",
+            parse_mode="Markdown"
+        )
+        await message.answer("Выберите тариф:", reply_markup=tariffs_keyboard())
+        return
     await state.set_state(SetupStates.waiting_wb_token)
     await message.answer(
-        "🔑 Введи свой *WB API токен*\n\n"
-        "Где взять: WB Seller → Настройки → Доступ к API → создай токен с доступом *Вопросы и отзывы*",
-        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
+        "🔑 Введите *WB API токен*\n\n"
+        "Где взять: WB Seller → Настройки → Доступ к API\n"
+        "При создании выберите раздел *Вопросы и отзывы* ✅",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -109,21 +145,25 @@ async def ask_wb_token(message: types.Message, state: FSMContext):
 async def save_wb_token(message: types.Message, state: FSMContext):
     token = message.text.strip()
     if len(token) < 50:
-        await message.answer("❌ Токен слишком короткий. Попробуй ещё раз:")
+        await message.answer("❌ Токен слишком короткий. Попробуйте ещё раз:")
         return
-    await message.answer("⏳ Проверяю токен...")
+    await message.answer("⏳ Проверяю подключение...")
     wb = WBClient(token)
     ok, info = await wb.test_connection()
     if not ok:
-        await message.answer(f"❌ Ошибка подключения: `{info}`",
-                           parse_mode="Markdown", reply_markup=main_menu())
+        await message.answer(
+            f"❌ Не удалось подключиться.\nОшибка: `{info}`",
+            parse_mode="Markdown", reply_markup=main_menu()
+        )
         await state.clear()
         return
     await db.save_wb_token(message.from_user.id, token)
     await save_token_to_railway(token)
     await state.clear()
     await message.answer(
-        "✅ *WB подключён!*\n\nБот проверяет отзывы каждые 5 минут и отвечает автоматически 🚀",
+        "✅ *Магазин подключён!*\n\n"
+        "Бот проверяет новые отзывы каждые 5 минут и отвечает автоматически.\n\n"
+        "Можете закрыть приложение — всё работает в фоне 24/7 🚀",
         parse_mode="Markdown", reply_markup=main_menu()
     )
 
@@ -145,20 +185,20 @@ async def cmd_stats(message: types.Message):
 async def cmd_balance(message: types.Message):
     user = await db.get_user(message.from_user.id)
     if not user:
-        await message.answer("Сначала нажми /start")
+        await message.answer("Сначала нажмите /start")
         return
     plan_key = user.get("plan", "trial")
-    plan_name = PLANS.get(plan_key, ("Неизвестный", 0, 0, 0))[0]
+    months = PLANS.get(plan_key, (None,))[2] if plan_key in PLANS else None
+    plan_name = f"{months} мес." if months else "Пробный 🆓"
     tokens_left = user.get("tokens_left", 0)
     tokens_total = user.get("tokens_total", 10)
     expires = user.get("sub_expires")
-    expires_str = expires.strftime("%d.%m.%Y") if expires else "—"
+    expires_str = str(expires)[:10] if expires else "—"
     await message.answer(
         f"💰 *Баланс:*\n\n"
-        f"📋 Тариф: *{plan_name}*\n"
+        f"📋 Подписка: *{plan_name}*\n"
         f"🎟 Токенов: *{tokens_left}* из *{tokens_total}*\n"
-        f"📅 Действует до: *{expires_str}*\n\n"
-        f"Для оплаты напиши /pay",
+        f"📅 До: *{expires_str}*",
         parse_mode="Markdown"
     )
 
@@ -166,28 +206,39 @@ async def cmd_balance(message: types.Message):
 @dp.message(lambda m: m.text == "💳 Тарифы")
 async def cmd_tariffs(message: types.Message):
     await message.answer(
-        "💳 *Тарифы:*\n\n"
-        "🆓 *Пробный* — бесплатно — 10 отзывов\n\n"
-        "🟢 *Старт* — 1 000 ₽/мес — 1 000 отзывов\n"
-        "🟡 *Бизнес* — 2 000 ₽/мес — 2 000 отзывов\n"
-        "🔴 *Про* — 3 000 ₽/мес — 3 000 отзывов\n"
-        "💎 *Премиум* — 4 000 ₽/мес — 4 000 отзывов\n"
-        "🚀 *Ультра* — 5 000 ₽/мес — 5 000 отзывов\n"
-        "👑 *Годовой* — 10 000 ₽/год — 12 000 отзывов\n\n"
-        "⚠️ Неиспользованные токены сгорают по истечении срока.\n"
-        "⚠️ Если токены закончатся раньше — нужно пополнить.\n\n"
-        "Для оплаты: /pay",
+        "💳 *Выберите тариф:*\n\n"
+        "Каждый ответ на отзыв = 1 токен.\n"
+        "Токены сгорают по окончании срока подписки.\n"
+        "🎁 Новым пользователям — 10 ответов бесплатно.",
+        parse_mode="Markdown",
+        reply_markup=tariffs_keyboard()
+    )
+
+
+@dp.callback_query(F.data.startswith("plan_"))
+async def handle_plan_select(callback: types.CallbackQuery):
+    plan_key = callback.data.replace("plan_", "")
+    if plan_key not in PLANS:
+        await callback.answer("Неизвестный тариф")
+        return
+    name, tokens, months, price = PLANS[plan_key]
+    await callback.message.answer(
+        f"📦 *{name}*\n\n"
+        f"🎟 Токенов: *{tokens:,}*\n"
+        f"💰 Стоимость: *{price:,} ₽*\n\n"
+        f"Оплата будет подключена в ближайшее время.\n"
+        f"Для оплаты напишите администратору.",
         parse_mode="Markdown"
     )
+    await callback.answer()
 
 
 @dp.message(Command("pay"))
 async def cmd_pay(message: types.Message):
     await message.answer(
-        "💳 *Оплата подписки*\n\n"
-        "Оплата будет подключена в ближайшее время.\n\n"
-        "Пока бот работает в *тестовом режиме* — 10 отзывов бесплатно 🎁",
-        parse_mode="Markdown"
+        "💳 *Оплата подписки*\n\nВыберите тариф:",
+        parse_mode="Markdown",
+        reply_markup=tariffs_keyboard()
     )
 
 
@@ -200,9 +251,8 @@ async def cmd_history(message: types.Message):
     text = "📋 *Последние ответы:*\n\n"
     for i, h in enumerate(history, 1):
         stars = "⭐" * (h.get("rating") or 0)
-        created = h.get("created_at")
-        date_str = created.strftime("%d.%m %H:%M") if created else ""
-        text += f"{i}. {stars} {date_str}\n_{str(h.get('reply',''))[:80]}..._\n\n"
+        created = str(h.get("created_at", ""))[:16]
+        text += f"{i}. {stars} {created}\n_{str(h.get('reply',''))[:80]}..._\n\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -211,10 +261,9 @@ async def cmd_referral(message: types.Message):
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{message.from_user.id}"
     await message.answer(
-        f"🎁 *Реферальная программа:*\n\n"
-        f"Приглашай продавцов и получай *10%* от их оплаты.\n\n"
-        f"Твоя ссылка:\n`{ref_link}`\n\n"
-        f"_(скоро будет активирована)_",
+        f"🎁 *Реферальная программа*\n\n"
+        f"Приглашайте других продавцов и получайте *10%* от их оплаты.\n\n"
+        f"Ваша ссылка:\n`{ref_link}`\n\n_(будет активирована в ближайшее время)_",
         parse_mode="Markdown"
     )
 
@@ -224,13 +273,16 @@ async def cmd_profile(message: types.Message):
     user = await db.get_user(message.from_user.id)
     has_wb = bool(user and user.get("wb_token"))
     plan_key = user.get("plan", "trial") if user else "trial"
-    plan_name = PLANS.get(plan_key, ("Неизвестный",))[0]
+    if plan_key in PLANS:
+        plan_name = f"{PLANS[plan_key][2]} мес."
+    else:
+        plan_name = "Пробный 🆓"
     await message.answer(
         f"⚙️ *Профиль:*\n\n"
-        f"👤 ID: `{message.from_user.id}`\n"
-        f"📋 Тариф: *{plan_name}*\n"
-        f"🔗 WB API: *{'✅ Подключён' if has_wb else '❌ Не подключён'}*\n\n"
-        f"/reset — сбросить WB токен",
+        f"🆔 ID: `{message.from_user.id}`\n"
+        f"📋 Подписка: *{plan_name}*\n"
+        f"🔗 WB: *{'Подключён ✅' if has_wb else 'Не подключён ❌'}*\n\n"
+        f"/reset — сбросить токен WB",
         parse_mode="Markdown"
     )
 
@@ -238,30 +290,27 @@ async def cmd_profile(message: types.Message):
 @dp.message(Command("reset"))
 async def cmd_reset(message: types.Message):
     await db.save_wb_token(message.from_user.id, "")
-    await message.answer("🔄 Токен сброшен. Введи новый через *🔑 Подключить API*", parse_mode="Markdown")
+    await message.answer("🔄 Токен сброшен. Введите новый через *🔑 Подключить API*", parse_mode="Markdown")
 
 
 async def notify_expiring():
-    """Уведомляет пользователей за день до истечения подписки"""
     while True:
         try:
             expiring = await db.get_users_expiring_soon()
             for uid in expiring:
                 try:
                     await bot.send_message(uid,
-                        "⚠️ *Внимание!*\n\n"
-                        "Завтра истекает ваша подписка.\n"
-                        "После истечения бот перестанет отвечать на отзывы.\n\n"
-                        "Продлите подписку: /pay",
+                        "⚠️ *Подписка истекает завтра*\n\n"
+                        "После окончания бот перестанет отвечать на отзывы.\n\n"
+                        "Продлить подписку: /pay",
                         parse_mode="Markdown"
                     )
                     await db.mark_expiry_notified(uid)
-                    logger.info(f"Sent expiry notification to {uid}")
                 except Exception as e:
                     logger.error(f"Error notifying {uid}: {e}")
         except Exception as e:
             logger.error(f"Notify worker error: {e}")
-        await asyncio.sleep(3600)  # проверяем каждый час
+        await asyncio.sleep(3600)
 
 
 async def review_worker():
@@ -277,29 +326,24 @@ async def review_worker():
                 reviews = await wb.get_unanswered_reviews()
                 if not reviews:
                     continue
-
                 logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
                 replied_count = 0
-
                 for review in reviews:
                     fid = review.get("id", "")
                     if await db._is_replied(fid):
                         continue
-
-                    # Проверяем и списываем токен
                     has_token = await db.use_token(uid)
                     if not has_token:
                         try:
                             await bot.send_message(uid,
-                                "⚠️ *Токены закончились!*\n\n"
+                                "⚠️ *Пробный период закончился*\n\n"
                                 "Бот приостановил ответы на отзывы.\n"
-                                "Пополните подписку: /pay",
+                                "Оформите подписку: /pay",
                                 parse_mode="Markdown"
                             )
                         except Exception:
                             pass
                         break
-
                     reply_text = await generate_reply(review)
                     success = await wb.post_reply(fid, reply_text)
                     if success:
@@ -308,19 +352,18 @@ async def review_worker():
                         logger.info(f"✅ Replied to {fid}")
                     await asyncio.sleep(2)
 
-                # Уведомляем пользователя если ответили на отзывы
                 if replied_count > 0:
                     try:
                         user_data = await db.get_user(uid)
                         tokens_left = user_data.get("tokens_left", 0) if user_data else 0
+                        word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
                         await bot.send_message(uid,
-                            f"✅ *Ответил на {replied_count} отзыв(а)*\n\n"
-                            f"🎟 Токенов осталось: *{tokens_left}*",
+                            f"✅ Ответил на *{replied_count} {word}*\n"
+                            f"🎟 Осталось токенов: *{tokens_left}*",
                             parse_mode="Markdown"
                         )
                     except Exception as e:
-                        logger.error(f"Error sending notification to {uid}: {e}")
-
+                        logger.error(f"Notification error {uid}: {e}")
         except Exception as e:
             logger.error(f"Review worker error: {e}")
         await asyncio.sleep(300)
