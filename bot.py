@@ -133,9 +133,16 @@ async def ask_wb_token(message: types.Message, state: FSMContext):
         return
     await state.set_state(SetupStates.waiting_wb_token)
     await message.answer(
-        "🔑 Введите *WB API токен*\n\n"
-        "Где взять: WB Seller → Настройки → Доступ к API\n"
-        "При создании выберите раздел *Вопросы и отзывы* ✅",
+        "🔑 *Как получить WB API токен:*\n\n"
+        "1️⃣ Зайдите в *WB Seller* (seller.wildberries.ru)\n"
+        "2️⃣ Настройки → Доступ к API\n"
+        "3️⃣ Нажмите *«Создать токен»*\n"
+        "4️⃣ Выберите вкладку *«Вручную»*\n"
+        "5️⃣ Тип токена: *«Персональный токен»*\n"
+        "6️⃣ Поставьте галочку ✅ *«Вопросы и отзывы»*\n"
+        "7️⃣ Уровень доступа: *«Чтение и запись»*\n"
+        "8️⃣ Придумайте название, нажмите *«Создать токен»*\n"
+        "9️⃣ Скопируйте токен и отправьте сюда 👇",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
     )
