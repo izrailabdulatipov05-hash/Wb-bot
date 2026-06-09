@@ -49,7 +49,8 @@ def main_menu():
             [KeyboardButton(text="📊 Статистика"),  KeyboardButton(text="🔑 Подключить API")],
             [KeyboardButton(text="💰 Баланс"),       KeyboardButton(text="💳 Тарифы")],
             [KeyboardButton(text="📋 История"),      KeyboardButton(text="🎁 Реферальная программа")],
-            [KeyboardButton(text="⚙️ Профиль")],
+            [KeyboardButton(text="⚙️ Профиль"),      KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="📄 Оферта")],
         ],
         resize_keyboard=True
     )
@@ -384,6 +385,66 @@ async def review_worker():
             logger.error(f"Review worker error: {e}")
         await asyncio.sleep(300)
 
+
+
+@dp.message(lambda m: m.text == "🆘 Поддержка")
+async def cmd_support(message: types.Message):
+    await message.answer(
+        "🆘 *Поддержка*\n\n"
+        "По всем вопросам обращайтесь к администратору:\n\n"
+        "👤 @CID202020\n\n"
+        "Время ответа: в течение 24 часов.",
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(lambda m: m.text == "📄 Оферта")
+async def cmd_oferta(message: types.Message):
+    await message.answer(
+        "📄 *Публичная оферта*\n\n"
+        "Используя бот, вы соглашаетесь с условиями оферты.\n\n"
+        "Нажмите кнопку ниже чтобы прочитать полный текст:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Читать оферту", callback_data="show_oferta_1")]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "show_oferta_1")
+async def show_oferta_part1(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "📄 *ПУБЛИЧНАЯ ОФЕРТА*\n"
+        "_о заключении договора об оказании услуг_\n\n"
+        "*1. Общие положения*\n"
+        "Настоящая Оферта содержит условия заключения Договора об оказании услуг. "
+        "Совершение действий (запуск бота, оплата подписки) означает безоговорочное принятие всех условий.\n\n"
+        "*Сервис (Бот)* — Telegram-бот @Wildberriess_help_bot для автоматической генерации ответов на отзывы WB с использованием ИИ.\n\n"
+        "*Токен* — единица тарификации, расходуемая при генерации каждого ответа.\n\n"
+        "*2. Предмет Договора*\n"
+        "Исполнитель оказывает услуги автоответов на отзывы WB. Заказчик оплачивает выбранный тариф.\n\n"
+        "*3. Цена и расчёты*\n"
+        "Тарифы опубликованы в боте. Оплата в рублях, авансом. "
+        "Неиспользованные токены не возвращаются и не переносятся.\n\n"
+        "*4. Ответственность*\n"
+        "Исполнитель не несёт ответственности за результаты использования ответов, "
+        "сбои Telegram и OpenAI. Ответственность ограничена суммой оплаченной подписки.\n\n"
+        "*5. Конфиденциальность*\n"
+        "Обрабатываются: Telegram ID, имя пользователя, история запросов. "
+        "Данные не передаются третьим лицам, кроме обезличенных запросов к OpenAI.\n\n"
+        "*10. Реквизиты Исполнителя*\n"
+        "Абдулатипов Зайнудин Зайнодинович\n"
+        "ИНН: 052402592602\n"
+        "Telegram: @CID202020\n"
+        "Email: ivanov3322111@mail.ru",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@dp.message(Command("oferta"))
+async def cmd_oferta_command(message: types.Message):
+    await cmd_oferta(message)
 
 async def main():
     await db._init()
