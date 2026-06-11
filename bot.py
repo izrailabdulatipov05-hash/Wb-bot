@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import aiohttp
+import hashlib
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -10,6 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiohttp import web as aio_web
 from wb_api import WBClient
 from openai_helper import generate_reply
 from database import Database
@@ -27,18 +29,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 db = Database()
 
-# Тарифы: ключ -> (название, токены, месяцев, цена)
-import hashlib
-from aiohttp import web as aio_web
-
 ROBOKASSA_LOGIN = "Wildberrieshelp"
 ROBOKASSA_PASS1 = "XNd9upBb1m7z27EcuVjW"
 ROBOKASSA_PASS2 = "dn46qte5kCp0ZNz8IVGi"
 
 
-def generate_payment_url(amount: int, order_id: str, description: str) -> str:
+def generate_payment_url(amount: int, order_id: int, plan_key: str, description: str) -> str:
+    # Робокасса требует, чтобы доп. параметры (shp_) шли в алфавитном порядке в конце строки хэша
     signature = hashlib.md5(
-        f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}".encode()
+        f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}:shp_plan={plan_key}".encode()
     ).hexdigest()
     desc_encoded = description.replace(" ", "+")
     return (
@@ -48,6 +47,7 @@ def generate_payment_url(amount: int, order_id: str, description: str) -> str:
         f"&InvId={order_id}"
         f"&Description={desc_encoded}"
         f"&SignatureValue={signature}"
+        f"&shp_plan={plan_key}"
         f"&IsTest=0"
     )
 
@@ -58,23 +58,27 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         out_sum = data.get("OutSum", "")
         inv_id = data.get("InvId", "")
         signature = data.get("SignatureValue", "")
+        plan_key = data.get("shp_plan", "")  # Получаем тариф из нашего параметра
+        
+        # Проверяем подпись Паролем #2 с учетом параметра shp_plan
         expected = hashlib.md5(
-            f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}".encode()
+            f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}:shp_plan={plan_key}".encode()
         ).hexdigest()
+        
         if expected.lower() != signature.lower():
-            return aio_aio_web.Response(text="bad sign")
-        parts = inv_id.split("_", 1)
-        if len(parts) != 2:
-            return aio_aio_web.Response(text="bad invid")
-        telegram_id = int(parts[0])
-        plan_key = parts[1]
+            return aio_web.Response(text="bad sign")
+            
+        # Теперь inv_id — это чистый числовой Telegram ID пользователя
+        telegram_id = int(inv_id)
+        
         PLAN_DATA = {
             "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
             "m4": (4000, 120), "m5": (5000, 150), "m6": (6000, 180),
             "m12": (12000, 365),
         }
         if plan_key not in PLAN_DATA:
-            return aio_aio_web.Response(text="bad plan")
+            return aio_web.Response(text="bad plan")
+            
         tokens, days = PLAN_DATA[plan_key]
         await db_instance.activate_plan(telegram_id, plan_key, tokens, days)
         months = days // 30
@@ -89,10 +93,10 @@ async def robokassa_webhook(request, bot_instance, db_instance):
             )
         except Exception:
             pass
-        return aio_aio_web.Response(text=f"OK{inv_id}")
+        return aio_web.Response(text=f"OK{inv_id}")
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return aio_aio_web.Response(text="error", status=500)
+        return aio_web.Response(text="error", status=500)
 
 
 
@@ -299,9 +303,9 @@ async def handle_plan_select(callback: types.CallbackQuery):
         return
     name, tokens, months, price = PLANS[plan_key]
     
-    # Генерируем уникальный order_id: telegram_id + plan_key
-    order_id = f"{callback.from_user.id}_{plan_key}"
-    pay_url = generate_payment_url(price, order_id, f"Подписка WB HELP {name}")
+    # Теперь order_id — это чистый числовой Telegram ID, Робокасса не будет ругаться
+    order_id = callback.from_user.id
+    pay_url = generate_payment_url(price, order_id, plan_key, f"Подписка WB HELP {name}")
     
     await callback.message.answer(
         f"📦 *{name}*\n\n"
@@ -404,7 +408,6 @@ async def notify_expiring():
 
 
 async def process_user(user: dict):
-    """Обрабатывает отзывы одного пользователя"""
     uid = user["telegram_id"]
     token = user["wb_token"]
     try:
@@ -533,7 +536,6 @@ async def main():
     asyncio.create_task(review_worker())
     asyncio.create_task(notify_expiring())
     
-    # Запускаем веб-сервер для webhook Робокассы
     app = aio_web.Application()
     app.router.add_post("/robokassa", lambda r: robokassa_webhook(r, bot, db))
     app.router.add_get("/health", lambda r: aio_web.Response(text="OK"))
