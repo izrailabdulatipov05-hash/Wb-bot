@@ -32,8 +32,8 @@ import hashlib
 from aiohttp import web as aio_web
 
 ROBOKASSA_LOGIN = "Wildberrieshelp"
-ROBOKASSA_PASS1 = "CbuIo7JXy353myxVO5kK"
-ROBOKASSA_PASS2 = "uXBbo8iGOHzoD32Y8l7G"
+ROBOKASSA_PASS1 = "XNd9upBb1m7z27EcuVjW"
+ROBOKASSA_PASS2 = "dn46qte5kCp0ZNz8IVGi"
 
 
 def generate_payment_url(amount: int, order_id: str, description: str) -> str:
