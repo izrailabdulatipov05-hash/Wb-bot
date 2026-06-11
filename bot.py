@@ -11,8 +11,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from wb_api import WBClient
-from aiohttp import web
-from payment import generate_payment_url, robokassa_webhook
 from openai_helper import generate_reply
 from database import Database
 
@@ -30,6 +28,74 @@ dp = Dispatcher(storage=MemoryStorage())
 db = Database()
 
 # Тарифы: ключ -> (название, токены, месяцев, цена)
+import hashlib
+from aiohttp import web as aio_web
+
+ROBOKASSA_LOGIN = "Wildberrieshelp"
+ROBOKASSA_PASS1 = "CbuIo7JXy353myxVO5kK"
+ROBOKASSA_PASS2 = "uXBbo8iGOHzoD32Y8l7G"
+
+
+def generate_payment_url(amount: int, order_id: str, description: str) -> str:
+    signature = hashlib.md5(
+        f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}".encode()
+    ).hexdigest()
+    desc_encoded = description.replace(" ", "+")
+    return (
+        f"https://auth.robokassa.ru/Merchant/Index.aspx"
+        f"?MerchantLogin={ROBOKASSA_LOGIN}"
+        f"&OutSum={amount}"
+        f"&InvId={order_id}"
+        f"&Description={desc_encoded}"
+        f"&SignatureValue={signature}"
+        f"&IsTest=0"
+    )
+
+
+async def robokassa_webhook(request, bot_instance, db_instance):
+    try:
+        data = await request.post()
+        out_sum = data.get("OutSum", "")
+        inv_id = data.get("InvId", "")
+        signature = data.get("SignatureValue", "")
+        expected = hashlib.md5(
+            f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}".encode()
+        ).hexdigest()
+        if expected.lower() != signature.lower():
+            return aio_aio_web.Response(text="bad sign")
+        parts = inv_id.split("_", 1)
+        if len(parts) != 2:
+            return aio_aio_web.Response(text="bad invid")
+        telegram_id = int(parts[0])
+        plan_key = parts[1]
+        PLAN_DATA = {
+            "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
+            "m4": (4000, 120), "m5": (5000, 150), "m6": (6000, 180),
+            "m12": (12000, 365),
+        }
+        if plan_key not in PLAN_DATA:
+            return aio_aio_web.Response(text="bad plan")
+        tokens, days = PLAN_DATA[plan_key]
+        await db_instance.activate_plan(telegram_id, plan_key, tokens, days)
+        months = days // 30
+        try:
+            await bot_instance.send_message(
+                telegram_id,
+                f"✅ *Оплата прошла успешно!*\n\n"
+                f"📋 Подписка: *{months} мес.*\n"
+                f"🎟 Токенов: *{tokens:,}*\n\n"
+                f"Бот уже работает и отвечает на ваши отзывы 🚀",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return aio_aio_web.Response(text=f"OK{inv_id}")
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return aio_aio_web.Response(text="error", status=500)
+
+
+
 PLANS = {
     "m1":  ("1 месяц",   1000,   1,   1000),
     "m2":  ("2 месяца",  2000,   2,   2000),
@@ -468,13 +534,13 @@ async def main():
     asyncio.create_task(notify_expiring())
     
     # Запускаем веб-сервер для webhook Робокассы
-    app = web.Application()
+    app = aio_web.Application()
     app.router.add_post("/robokassa", lambda r: robokassa_webhook(r, bot, db))
-    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+    app.router.add_get("/health", lambda r: aio_web.Response(text="OK"))
     
-    runner = web.AppRunner(app)
+    runner = aio_web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 3000)
+    site = aio_web.TCPSite(runner, "0.0.0.0", 3000)
     await site.start()
     logger.info("🌐 Web server started on port 3000")
     
