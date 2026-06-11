@@ -34,9 +34,10 @@ ROBOKASSA_LOGIN = "Wildberrieshelp"
 ROBOKASSA_PASS1 = "XNd9upBb1m7z27EcuVjW"
 ROBOKASSA_PASS2 = "dn46qte5kCp0ZNz8IVGi"
 
+ADMIN_ID = 8778493098
+
 
 def generate_payment_url(amount: int, order_id: int, plan_key: str, rnd_str: str, description: str) -> str:
-    # Доп. параметры (shp_) ОБЯЗАТЕЛЬНО должны идти в алфавитном порядке в конце строки хэша: shp_plan, затем shp_rnd
     signature = hashlib.md5(
         f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}:shp_plan={plan_key}:shp_rnd={rnd_str}".encode()
     ).hexdigest()
@@ -62,19 +63,13 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         signature = data.get("SignatureValue", "")
         plan_key = data.get("shp_plan", "")
         rnd_str = data.get("shp_rnd", "")
-        
-        # Проверяем подпись Паролем #2 с учетом всех параметров в алфавитном порядке
         expected = hashlib.md5(
             f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}:shp_plan={plan_key}:shp_rnd={rnd_str}".encode()
         ).hexdigest()
-        
         if expected.lower() != signature.lower():
             logger.error("❌ Робокасса: неверная подпись вебхука")
             return aio_web.Response(text="bad sign")
-            
-        # Теперь inv_id — это чистый числовой Telegram ID пользователя, никаких манипуляций со строками не нужно
         telegram_id = int(inv_id)
-        
         PLAN_DATA = {
             "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
             "m4": (4000, 120), "m5": (5000, 150), "m6": (6000, 180),
@@ -82,7 +77,6 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         }
         if plan_key not in PLAN_DATA:
             return aio_web.Response(text="bad plan")
-            
         tokens, days = PLAN_DATA[plan_key]
         await db_instance.activate_plan(telegram_id, plan_key, tokens, days)
         months = days // 30
@@ -101,7 +95,6 @@ async def robokassa_webhook(request, bot_instance, db_instance):
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return aio_web.Response(text="error", status=500)
-
 
 
 PLANS = {
@@ -306,14 +299,9 @@ async def handle_plan_select(callback: types.CallbackQuery):
         await callback.answer("Неизвестный тариф")
         return
     name, tokens, months, price = PLANS[plan_key]
-    
-    # Чистый числовой ID пользователя (передаем как int)
     order_id = callback.from_user.id
-    # Генерируем текущую метку времени как строку для уникальности ссылки
     rnd_str = str(int(time.time()))
-    
     pay_url = generate_payment_url(price, order_id, plan_key, rnd_str, f"Подписка WB HELP {name}")
-    
     await callback.message.answer(
         f"📦 *{name}*\n\n"
         f"🎟 Токенов: *{tokens:,}*\n"
@@ -394,91 +382,6 @@ async def cmd_reset(message: types.Message):
     await message.answer("🔄 Токен сброшен. Введите новый через *🔑 Подключить API*", parse_mode="Markdown")
 
 
-async def notify_expiring():
-    while True:
-        try:
-            expiring = await db.get_users_expiring_soon()
-            for uid in expiring:
-                try:
-                    await bot.send_message(uid,
-                        "⚠️ *Подписка истекает завтра*\n\n"
-                        "После окончания бот перестанет отвечать на отзывы.\n\n"
-                        "Продлить подписку: /pay",
-                        parse_mode="Markdown"
-                    )
-                    await db.mark_expiry_notified(uid)
-                except Exception as e:
-                    logger.error(f"Error notifying {uid}: {e}")
-        except Exception as e:
-            logger.error(f"Notify worker error: {e}")
-        await asyncio.sleep(3600)
-
-
-async def process_user(user: dict):
-    uid = user["telegram_id"]
-    token = user["wb_token"]
-    try:
-        wb = WBClient(token)
-        reviews = await wb.get_unanswered_reviews()
-        if not reviews:
-            return
-        logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
-        replied_count = 0
-        for review in reviews:
-            fid = review.get("id", "")
-            if await db._is_replied(fid):
-                continue
-            has_token = await db.use_token(uid)
-            if not has_token:
-                try:
-                    await bot.send_message(uid,
-                        "⚠️ *Пробный период закончился*\n\n"
-                        "Бот приостановил ответы на отзывы.\n"
-                        "Оформите подписку: /pay",
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
-                break
-            reply_text = await generate_reply(review)
-            success = await wb.post_reply(fid, reply_text)
-            if success:
-                await db._log_reply(uid, fid, review.get("productValuation", 0), reply_text)
-                replied_count += 1
-                logger.info(f"✅ Replied to {fid}")
-            await asyncio.sleep(2)
-
-        if replied_count > 0:
-            try:
-                user_data = await db.get_user(uid)
-                tokens_left = user_data.get("tokens_left", 0) if user_data else 0
-                word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
-                await bot.send_message(uid,
-                    f"✅ Ответил на *{replied_count} {word}*\n"
-                    f"🎟 Осталось токенов: *{tokens_left}*",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Notification error {uid}: {e}")
-    except Exception as e:
-        logger.error(f"Error processing user {uid}: {e}")
-
-
-async def review_worker():
-    logger.info("🔄 Review worker started")
-    await asyncio.sleep(15)
-    while True:
-        try:
-            users = await db.get_users_with_token()
-            if users:
-                logger.info(f"Processing {len(users)} users in parallel")
-                await asyncio.gather(*[process_user(u) for u in users])
-        except Exception as e:
-            logger.error(f"Review worker error: {e}")
-        await asyncio.sleep(300)
-
-
-
 @dp.message(lambda m: m.text == "🆘 Поддержка")
 async def cmd_support(message: types.Message):
     await message.answer(
@@ -538,21 +441,196 @@ async def show_oferta_part1(callback: types.CallbackQuery):
 async def cmd_oferta_command(message: types.Message):
     await cmd_oferta(message)
 
+
+# ── ADMIN КОМАНДЫ ──
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM users")
+        active_wb = await conn.fetchval("SELECT COUNT(*) FROM users WHERE wb_token != ''")
+        paid = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan != 'trial'")
+        trial = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan = 'trial'")
+        total_replies = await conn.fetchval("SELECT COUNT(*) FROM replies")
+        today_replies = await conn.fetchval(
+            "SELECT COUNT(*) FROM replies WHERE created_at > NOW() - INTERVAL '24 hours'"
+        )
+        recent = await conn.fetch(
+            "SELECT telegram_id, username, plan, tokens_left, created_at FROM users ORDER BY created_at DESC LIMIT 5"
+        )
+    text = (
+        f"👨‍💼 *Панель администратора*\n\n"
+        f"👥 Всего пользователей: *{total}*\n"
+        f"🔗 С подключённым WB: *{active_wb}*\n"
+        f"💰 Платных подписок: *{paid}*\n"
+        f"🆓 На пробном: *{trial}*\n\n"
+        f"📊 Ответов всего: *{total_replies}*\n"
+        f"📊 Ответов за 24ч: *{today_replies}*\n\n"
+        f"*Последние 5 пользователей:*\n"
+    )
+    for u in recent:
+        date = str(u['created_at'])[:10]
+        username = f"@{u['username']}" if u['username'] else f"id{u['telegram_id']}"
+        text += f"• {username} — {u['plan']} — {u['tokens_left']}т — {date}\n"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        users = await conn.fetch(
+            "SELECT telegram_id, username, plan, tokens_left, sub_expires, wb_token FROM users ORDER BY created_at DESC LIMIT 20"
+        )
+    text = "👥 *Последние 20 пользователей:*\n\n"
+    for u in users:
+        username = f"@{u['username']}" if u['username'] else f"id{u['telegram_id']}"
+        has_wb = "✅" if u['wb_token'] else "❌"
+        expires = str(u['sub_expires'])[:10] if u['sub_expires'] else "—"
+        text += f"{username} | {u['plan']} | {u['tokens_left']}т | WB:{has_wb} | до {expires}\n"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@dp.message(Command("grant"))
+async def cmd_grant(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("Использование: /grant TELEGRAM_ID ПЛАН\nПланы: m1 m2 m3 m4 m5 m6 m12")
+        return
+    try:
+        uid = int(args[1])
+        plan_key = args[2]
+        PLAN_DATA = {
+            "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
+            "m4": (4000, 120), "m5": (5000, 150), "m6": (6000, 180),
+            "m12": (12000, 365),
+        }
+        if plan_key not in PLAN_DATA:
+            await message.answer("Неверный план. Доступны: m1 m2 m3 m4 m5 m6 m12")
+            return
+        tokens, days = PLAN_DATA[plan_key]
+        await db.activate_plan(uid, plan_key, tokens, days)
+        await message.answer(f"✅ Подписка {plan_key} выдана пользователю {uid}")
+        try:
+            months = days // 30
+            await bot.send_message(uid,
+                f"✅ *Подписка активирована!*\n\n"
+                f"📋 Тариф: *{months} мес.*\n"
+                f"🎟 Токенов: *{tokens:,}*\n\n"
+                f"Бот уже работает 🚀",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+
+async def notify_expiring():
+    while True:
+        try:
+            expiring = await db.get_users_expiring_soon()
+            for uid in expiring:
+                try:
+                    await bot.send_message(uid,
+                        "⚠️ *Подписка истекает завтра*\n\n"
+                        "После окончания бот перестанет отвечать на отзывы.\n\n"
+                        "Продлить подписку: /pay",
+                        parse_mode="Markdown"
+                    )
+                    await db.mark_expiry_notified(uid)
+                except Exception as e:
+                    logger.error(f"Error notifying {uid}: {e}")
+        except Exception as e:
+            logger.error(f"Notify worker error: {e}")
+        await asyncio.sleep(3600)
+
+
+async def process_user(user: dict):
+    uid = user["telegram_id"]
+    token = user["wb_token"]
+    try:
+        wb = WBClient(token)
+        reviews = await wb.get_unanswered_reviews()
+        if not reviews:
+            return
+        logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
+        replied_count = 0
+        for review in reviews:
+            fid = review.get("id", "")
+            if await db._is_replied(fid):
+                continue
+            has_token = await db.use_token(uid)
+            if not has_token:
+                try:
+                    await bot.send_message(uid,
+                        "⚠️ *Пробный период закончился*\n\n"
+                        "Бот приостановил ответы на отзывы.\n"
+                        "Оформите подписку: /pay",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+                break
+            reply_text = await generate_reply(review)
+            success = await wb.post_reply(fid, reply_text)
+            if success:
+                await db._log_reply(uid, fid, review.get("productValuation", 0), reply_text)
+                replied_count += 1
+                logger.info(f"✅ Replied to {fid}")
+            await asyncio.sleep(2)
+        if replied_count > 0:
+            try:
+                user_data = await db.get_user(uid)
+                tokens_left = user_data.get("tokens_left", 0) if user_data else 0
+                word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
+                await bot.send_message(uid,
+                    f"✅ Ответил на *{replied_count} {word}*\n"
+                    f"🎟 Осталось токенов: *{tokens_left}*",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Notification error {uid}: {e}")
+    except Exception as e:
+        logger.error(f"Error processing user {uid}: {e}")
+
+
+async def review_worker():
+    logger.info("🔄 Review worker started")
+    await asyncio.sleep(15)
+    while True:
+        try:
+            users = await db.get_users_with_token()
+            if users:
+                logger.info(f"Processing {len(users)} users in parallel")
+                await asyncio.gather(*[process_user(u) for u in users])
+        except Exception as e:
+            logger.error(f"Review worker error: {e}")
+        await asyncio.sleep(300)
+
+
 async def main():
     await db._init()
     asyncio.create_task(review_worker())
     asyncio.create_task(notify_expiring())
-    
+
     app = aio_web.Application()
     app.router.add_post("/robokassa", lambda r: robokassa_webhook(r, bot, db))
     app.router.add_get("/health", lambda r: aio_web.Response(text="OK"))
-    
+
     runner = aio_web.AppRunner(app)
     await runner.setup()
     site = aio_web.TCPSite(runner, "0.0.0.0", 3000)
     await site.start()
     logger.info("🌐 Web server started on port 3000")
-    
+
     logger.info("🚀 Bot started")
     await dp.start_polling(bot, skip_updates=True)
 
