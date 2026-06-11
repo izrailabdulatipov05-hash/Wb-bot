@@ -35,10 +35,10 @@ ROBOKASSA_PASS1 = "XNd9upBb1m7z27EcuVjW"
 ROBOKASSA_PASS2 = "dn46qte5kCp0ZNz8IVGi"
 
 
-def generate_payment_url(amount: int, order_id: str, plan_key: str, description: str) -> str:
-    # Робокасса требует, чтобы доп. параметры (shp_) шли в алфавитном порядке в конце строки хэша
+def generate_payment_url(amount: int, order_id: int, plan_key: str, rnd_str: str, description: str) -> str:
+    # Доп. параметры (shp_) ОБЯЗАТЕЛЬНО должны идти в алфавитном порядке в конце строки хэша: shp_plan, затем shp_rnd
     signature = hashlib.md5(
-        f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}:shp_plan={plan_key}".encode()
+        f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}:shp_plan={plan_key}:shp_rnd={rnd_str}".encode()
     ).hexdigest()
     desc_encoded = description.replace(" ", "+")
     return (
@@ -49,6 +49,7 @@ def generate_payment_url(amount: int, order_id: str, plan_key: str, description:
         f"&Description={desc_encoded}"
         f"&SignatureValue={signature}"
         f"&shp_plan={plan_key}"
+        f"&shp_rnd={rnd_str}"
         f"&IsTest=0"
     )
 
@@ -60,21 +61,19 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         inv_id = data.get("InvId", "")
         signature = data.get("SignatureValue", "")
         plan_key = data.get("shp_plan", "")
+        rnd_str = data.get("shp_rnd", "")
         
-        # Проверяем подпись Паролем #2
+        # Проверяем подпись Паролем #2 с учетом всех параметров в алфавитном порядке
         expected = hashlib.md5(
-            f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}:shp_plan={plan_key}".encode()
+            f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}:shp_plan={plan_key}:shp_rnd={rnd_str}".encode()
         ).hexdigest()
         
         if expected.lower() != signature.lower():
+            logger.error("❌ Робокасса: неверная подпись вебхука")
             return aio_web.Response(text="bad sign")
             
-        # Отсекаем временную метку (последние 10 цифр), чтобы получить чистый Telegram ID пользователя
-        inv_id_str = str(inv_id)
-        if len(inv_id_str) > 10:
-            telegram_id = int(inv_id_str[:-10])
-        else:
-            telegram_id = int(inv_id_str)
+        # Теперь inv_id — это чистый числовой Telegram ID пользователя, никаких манипуляций со строками не нужно
+        telegram_id = int(inv_id)
         
         PLAN_DATA = {
             "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
@@ -308,11 +307,12 @@ async def handle_plan_select(callback: types.CallbackQuery):
         return
     name, tokens, months, price = PLANS[plan_key]
     
-    # Склеиваем Telegram ID и текущее время в секундах (например, 87784930981718123456)
-    # Это гарантирует 100% уникальность инвойса для Робокассы при каждом нажатии
-    order_id = f"{callback.from_user.id}{int(time.time())}"
+    # Чистый числовой ID пользователя (передаем как int)
+    order_id = callback.from_user.id
+    # Генерируем текущую метку времени как строку для уникальности ссылки
+    rnd_str = str(int(time.time()))
     
-    pay_url = generate_payment_url(price, order_id, plan_key, f"Подписка WB HELP {name}")
+    pay_url = generate_payment_url(price, order_id, plan_key, rnd_str, f"Подписка WB HELP {name}")
     
     await callback.message.answer(
         f"📦 *{name}*\n\n"
