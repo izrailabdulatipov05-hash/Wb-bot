@@ -11,6 +11,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from wb_api import WBClient
+from aiohttp import web
+from payment import generate_payment_url, robokassa_webhook
 from openai_helper import generate_reply
 from database import Database
 
@@ -230,14 +232,28 @@ async def handle_plan_select(callback: types.CallbackQuery):
         await callback.answer("Неизвестный тариф")
         return
     name, tokens, months, price = PLANS[plan_key]
+    
+    # Генерируем уникальный order_id: telegram_id + plan_key
+    order_id = f"{callback.from_user.id}_{plan_key}"
+    pay_url = generate_payment_url(price, order_id, f"Подписка WB HELP {name}")
+    
     await callback.message.answer(
         f"📦 *{name}*\n\n"
         f"🎟 Токенов: *{tokens:,}*\n"
         f"💰 Стоимость: *{price:,} ₽*\n\n"
-        f"Оплата будет подключена в ближайшее время.\n"
-        f"Для оплаты напишите администратору.",
-        parse_mode="Markdown"
+        f"После оплаты подписка активируется автоматически.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💳 Оплатить {price:,} ₽", url=pay_url)],
+            [InlineKeyboardButton(text="◀️ Назад к тарифам", callback_data="back_to_plans")]
+        ])
     )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_plans")
+async def back_to_plans(callback: types.CallbackQuery):
+    await callback.message.answer("💳 Выберите тариф:", reply_markup=tariffs_keyboard())
     await callback.answer()
 
 
@@ -450,6 +466,18 @@ async def main():
     await db._init()
     asyncio.create_task(review_worker())
     asyncio.create_task(notify_expiring())
+    
+    # Запускаем веб-сервер для webhook Робокассы
+    app = web.Application()
+    app.router.add_post("/robokassa", lambda r: robokassa_webhook(r, bot, db))
+    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 3000)
+    await site.start()
+    logger.info("🌐 Web server started on port 3000")
+    
     logger.info("🚀 Bot started")
     await dp.start_polling(bot, skip_updates=True)
 
