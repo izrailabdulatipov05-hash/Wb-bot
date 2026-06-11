@@ -3,6 +3,7 @@ import logging
 import os
 import aiohttp
 import hashlib
+import time
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -34,7 +35,7 @@ ROBOKASSA_PASS1 = "XNd9upBb1m7z27EcuVjW"
 ROBOKASSA_PASS2 = "dn46qte5kCp0ZNz8IVGi"
 
 
-def generate_payment_url(amount: int, order_id: int, plan_key: str, description: str) -> str:
+def generate_payment_url(amount: int, order_id: str, plan_key: str, description: str) -> str:
     # Робокасса требует, чтобы доп. параметры (shp_) шли в алфавитном порядке в конце строки хэша
     signature = hashlib.md5(
         f"{ROBOKASSA_LOGIN}:{amount}:{order_id}:{ROBOKASSA_PASS1}:shp_plan={plan_key}".encode()
@@ -58,9 +59,9 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         out_sum = data.get("OutSum", "")
         inv_id = data.get("InvId", "")
         signature = data.get("SignatureValue", "")
-        plan_key = data.get("shp_plan", "")  # Получаем тариф из нашего параметра
+        plan_key = data.get("shp_plan", "")
         
-        # Проверяем подпись Паролем #2 с учетом параметра shp_plan
+        # Проверяем подпись Паролем #2
         expected = hashlib.md5(
             f"{out_sum}:{inv_id}:{ROBOKASSA_PASS2}:shp_plan={plan_key}".encode()
         ).hexdigest()
@@ -68,8 +69,12 @@ async def robokassa_webhook(request, bot_instance, db_instance):
         if expected.lower() != signature.lower():
             return aio_web.Response(text="bad sign")
             
-        # Теперь inv_id — это чистый числовой Telegram ID пользователя
-        telegram_id = int(inv_id)
+        # Отсекаем временную метку (последние 10 цифр), чтобы получить чистый Telegram ID пользователя
+        inv_id_str = str(inv_id)
+        if len(inv_id_str) > 10:
+            telegram_id = int(inv_id_str[:-10])
+        else:
+            telegram_id = int(inv_id_str)
         
         PLAN_DATA = {
             "m1": (1000, 30), "m2": (2000, 60), "m3": (3000, 90),
@@ -303,8 +308,10 @@ async def handle_plan_select(callback: types.CallbackQuery):
         return
     name, tokens, months, price = PLANS[plan_key]
     
-    # Теперь order_id — это чистый числовой Telegram ID, Робокасса не будет ругаться
-    order_id = callback.from_user.id
+    # Склеиваем Telegram ID и текущее время в секундах (например, 87784930981718123456)
+    # Это гарантирует 100% уникальность инвойса для Робокассы при каждом нажатии
+    order_id = f"{callback.from_user.id}{int(time.time())}"
+    
     pay_url = generate_payment_url(price, order_id, plan_key, f"Подписка WB HELP {name}")
     
     await callback.message.answer(
