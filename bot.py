@@ -554,69 +554,69 @@ async def notify_expiring():
 
 
 async def process_user(user: dict):
-      uid = user["telegram_id"]
-      token = user["wb_token"]
-      async with db.generation_lock(uid) as generation_conn:
-          if generation_conn is None:
-              logger.info("User %s: generation already in progress; skipping", uid)
-              return
-          try:
-              wb = WBClient(token)
-              reviews = await wb.get_unanswered_reviews()
-              if not reviews:
-                  return
-              logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
-              replied_count = 0
-              for review in reviews:
-                  fid = review.get("id", "")
-                  if await db._is_replied(fid, conn=generation_conn):
-                      continue
-                  has_token = await db.reserve_token(uid, conn=generation_conn)
-                  if not has_token:
-                      try:
-                          await bot.send_message(uid,
-                              "⚠️ *Пробный период закончился*\n\n"
-                              "Бот приостановил ответы на отзывы.\n"
-                              "Оформите подписку: /pay",
-                              parse_mode="Markdown"
-                          )
-                      except Exception:
-                          pass
-                      break
-                  try:
-                      reply_text = await generate_reply(review)
-                      success = await wb.post_reply(fid, reply_text)
-                  except Exception:
-                      await db.refund_token(uid, conn=generation_conn)
-                      raise
-                  if success:
-                      await db._log_reply(
-                          uid, fid, review.get("productValuation", 0), reply_text,
-                          conn=generation_conn
-                      )
-                      replied_count += 1
-                      logger.info(f"✅ Replied to {fid}")
-                  else:
-                      await db.refund_token(uid, conn=generation_conn)
-                      logger.warning("User %s: failed to publish reply %s; token refunded", uid, fid)
-                  await asyncio.sleep(2)
-              if replied_count > 0:
-                  try:
-                      user_data = await db.get_user(uid, conn=generation_conn)
-                      tokens_left = user_data.get("tokens_left", 0) if user_data else 0
-                      word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
-                      await bot.send_message(uid,
-                          f"✅ Ответил на *{replied_count} {word}*\n"
-                          f"🎟 Осталось токенов: *{tokens_left}*",
-                          parse_mode="Markdown"
-                      )
-                  except Exception as e:
-                      logger.error(f"Notification error {uid}: {e}")
-          except Exception as e:
-              logger.error(f"Error processing user {uid}: {e}")
+    uid = user["telegram_id"]
+    token = user["wb_token"]
+    async with db.generation_lock(uid) as generation_conn:
+        if generation_conn is None:
+            logger.info("User %s: generation already in progress; skipping", uid)
+            return
+        try:
+            wb = WBClient(token)
+            reviews = await wb.get_unanswered_reviews()
+            if not reviews:
+                return
+            logger.info(f"User {uid}: {len(reviews)} unanswered reviews")
+            replied_count = 0
+            for review in reviews:
+                fid = review.get("id", "")
+                if await db._is_replied(fid, conn=generation_conn):
+                    continue
+                has_token = await db.reserve_token(uid, conn=generation_conn)
+                if not has_token:
+                    try:
+                        await bot.send_message(uid,
+                            "⚠️ *Пробный период закончился*\n\n"
+                            "Бот приостановил ответы на отзывы.\n"
+                            "Оформите подписку: /pay",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                    break
+                try:
+                    reply_text = await generate_reply(review)
+                    success = await wb.post_reply(fid, reply_text)
+                except Exception:
+                    await db.refund_token(uid, conn=generation_conn)
+                    raise
+                if success:
+                    await db._log_reply(
+                        uid, fid, review.get("productValuation", 0), reply_text,
+                        conn=generation_conn
+                    )
+                    replied_count += 1
+                    logger.info(f"✅ Replied to {fid}")
+                else:
+                    await db.refund_token(uid, conn=generation_conn)
+                    logger.warning("User %s: failed to publish reply %s; token refunded", uid, fid)
+                await asyncio.sleep(2)
+            if replied_count > 0:
+                try:
+                    user_data = await db.get_user(uid, conn=generation_conn)
+                    tokens_left = user_data.get("tokens_left", 0) if user_data else 0
+                    word = "отзыв" if replied_count == 1 else "отзыва" if replied_count < 5 else "отзывов"
+                    await bot.send_message(uid,
+                        f"✅ Ответил на *{replied_count} {word}*\n"
+                        f"🎟 Осталось токенов: *{tokens_left}*",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Notification error {uid}: {e}")
+        except Exception as e:
+            logger.error(f"Error processing user {uid}: {e}")
 
 
-    async def review_worker():
+async def review_worker():
     logger.info("🔄 Review worker started")
     await asyncio.sleep(15)
     while True:
