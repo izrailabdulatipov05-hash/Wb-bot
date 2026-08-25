@@ -1,10 +1,82 @@
 import asyncio
 import os
+import sys
+import types as python_types
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import patch
 
 os.environ.setdefault("BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk")
+
+
+class Noop:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class Filter:
+    def __getattr__(self, _name):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __eq__(self, _other):
+        return self
+
+
+class Dispatcher(Noop):
+    def message(self, *args, **kwargs):
+        return lambda handler: handler
+
+    def callback_query(self, *args, **kwargs):
+        return lambda handler: handler
+
+
+async def create_pool(*args, **kwargs):
+    return Noop()
+
+
+aiogram_module = python_types.ModuleType("aiogram")
+aiogram_module.Bot = Noop
+aiogram_module.Dispatcher = Dispatcher
+aiogram_module.F = Filter()
+aiogram_module.types = python_types.SimpleNamespace(
+    Message=Noop, CallbackQuery=Noop, BotCommand=Noop
+)
+aiogram_filters = python_types.ModuleType("aiogram.filters")
+aiogram_filters.Command = Noop
+aiogram_context = python_types.ModuleType("aiogram.fsm.context")
+aiogram_context.FSMContext = Noop
+aiogram_state = python_types.ModuleType("aiogram.fsm.state")
+aiogram_state.State = Noop
+aiogram_state.StatesGroup = Noop
+aiogram_memory = python_types.ModuleType("aiogram.fsm.storage.memory")
+aiogram_memory.MemoryStorage = Noop
+aiogram_types = python_types.ModuleType("aiogram.types")
+aiogram_types.ReplyKeyboardMarkup = Noop
+aiogram_types.KeyboardButton = Noop
+aiogram_types.ReplyKeyboardRemove = Noop
+aiogram_types.InlineKeyboardMarkup = Noop
+aiogram_types.InlineKeyboardButton = Noop
+aiohttp_module = python_types.ModuleType("aiohttp")
+aiohttp_module.ClientSession = Noop
+aiohttp_module.ClientTimeout = Noop
+aiohttp_module.web = python_types.SimpleNamespace(
+    Application=Noop, Response=Noop, AppRunner=Noop, TCPSite=Noop
+)
+asyncpg_module = python_types.ModuleType("asyncpg")
+asyncpg_module.create_pool = create_pool
+sys.modules.update({
+    "aiogram": aiogram_module,
+    "aiogram.filters": aiogram_filters,
+    "aiogram.fsm.context": aiogram_context,
+    "aiogram.fsm.state": aiogram_state,
+    "aiogram.fsm.storage.memory": aiogram_memory,
+    "aiogram.types": aiogram_types,
+    "aiohttp": aiohttp_module,
+    "asyncpg": asyncpg_module,
+})
 
 import bot as bot_module
 
