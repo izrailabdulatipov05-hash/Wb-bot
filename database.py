@@ -79,7 +79,7 @@ class Database:
             )
         return dict(row) if row else None
 
-        async def create_user(self, telegram_id: int, username: str):
+    async def create_user(self, telegram_id: int, username: str):
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -159,7 +159,7 @@ class Database:
         async with pool.acquire() as connection:
             await refund(connection)
 
-        async def get_users_with_token(self):
+    async def get_users_with_token(self):
         pool = await get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -214,7 +214,7 @@ class Database:
         async with pool.acquire() as connection:
             await log(connection)
 
-        async def _get_count(self, telegram_id):
+    async def _get_count(self, telegram_id):
         pool = await get_pool()
         async with pool.acquire() as conn:
             return await conn.fetchval(
